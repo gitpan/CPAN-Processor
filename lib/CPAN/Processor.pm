@@ -42,7 +42,7 @@ use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 our $errstr  = '';
 
 
@@ -348,14 +348,15 @@ sub mirror_expand {
 					$Tar->extract_file( $wanted, $source_file );
 					};
 			}
-			unless ( $@ or ! $rv ) {
+			if ( $@ or ! $rv ) {
 				# There was an error during the extraction
+				$self->_tar_error( " ... failed" );
 				if ( -e $source_file ) {
 					# Remove any partial file left behind
 					chmod 0644, $source_file;
 					File::Remove::remove( $source_file );
 				}
-				return $self->_tar_error( " ... failed" );
+				return 1;
 			}
 
 			# Extraction successful

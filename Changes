@@ -1,5 +1,10 @@
 Revision history for Perl extension CPAN::Processor
 
+0.06 Mon Jan 10 2005
+	- Removed a useless setting of $self->{limit_processor}
+	- Updated the version dependency to match changes to PPI::Processor
+	- Fixed several bugs in the Archive::Tar extraction code
+
 0.05 Mon Jan 10 2005
 	- Added support for Archive::Tar warning reports
 
