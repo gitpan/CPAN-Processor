@@ -66,6 +66,11 @@ METHODS
             qr/\bAcme\b/, # Don't extract anything related to Acme
           ]
 
+    check_expand
+        Once the mirror update has been completed, the check_expand keyword
+        forces the processor to go back over every tarball in the mirror and
+        double check that it has a corrosponding expanded directory.
+
     Returns a new CPAN::Processor object, or "undef" on error.
 
   processor

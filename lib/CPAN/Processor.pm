@@ -30,7 +30,7 @@ CPAN::Mini to support instantiability.
 =head1 METHODS
 
 =cut
-
+use 5.006;
 use strict;
 use UNIVERSAL 'isa';
 use base 'CPAN::Processor::CPANMini';
@@ -38,12 +38,10 @@ use File::Remove   ();
 use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
+use File::Path     ();
 
-use vars qw{$VERSION $errstr};
-BEGIN {
-	$VERSION = '0.01';
-	$errstr  = '';
-}
+our $VERSION = '0.02';
+our $errstr  = '';
 
 
 
@@ -100,6 +98,12 @@ want to be extracted.
     qr/\binc\b/i, # Don't extract included modules
     qr/\bAcme\b/, # Don't extract anything related to Acme
   ]
+
+=item check_expand
+
+Once the mirror update has been completed, the check_expand keyword
+forces the processor to go back over every tarball in the mirror and
+double check that it has a corrosponding expanded directory.
 
 =back
 
@@ -175,11 +179,88 @@ sub run {
 	$self->{cleaned} = {};
 
 	# Update the CPAN::Mini local mirror
-	my $changes = $self->update_mirror;
-	return '' unless $changes;
+	$self->trace("Updating MiniCPAN local mirror\n");
+	my $changes = eval { $self->update_mirror; };
+	$changes ||= 0;
+	if ( $@ ) {
+		my $message = $@;
+		$message =~ s/\bat line\b.+//;
+		return $self->_error($message);
+	}
+
+	if ( $self->{check_expand} ) {
+		# Expansion checking is enabled, find the full list of
+		# files to check.
+		$self->trace("Tarball expansion checking enabled\n");
+		my @files = File::Find::Rule->new
+		                            ->file
+		                            ->name('*.tar.gz')
+		                            ->relative
+		                            ->in( $self->{local} );
+		$self->trace("Checking " . scalar(@files) . " tarballs\n");
+
+		# Filter to just those we need to expand
+		@files = grep { ! -d File::Spec->catfile( $self->processor->source, $_ ) } @files;
+		if ( @files ) {
+			$self->trace("Scheduling " . scalar(@files) . " tarballs for expansion\n");
+		} else {
+			$self->trace("No tarballs need to be expanded");
+		}
+
+		# Expand each of the tarballs
+		foreach my $file ( sort @files ) {
+			$self->expand_file( $file );
+			$changes++;
+		}
+	}
+
+	# Return now if no changes
+	return 1 unless $changes;
 
 	# Launch the processor
 	$self->processor->run;
+}
+
+sub expand_file {
+	my ($self, $file) = @_;
+
+	# Don't try to expand anything other than tarballs
+	return 1 unless $file =~ /\.tar\.gz$/;
+
+	# Extract the new file to the matching directory in
+	# the processor source directory.
+	my $local_tar  = File::Spec->catfile( $self->{local}, $file );
+	my @contents  = Archive::Tar->list_archive( $local_tar );
+
+	# Filter to get just the ones we want
+	@contents = grep { /\.(?:pm|pl|t)$/ } @contents;
+	if ( $self->{file_filters} ) {
+		@contents = grep &{$self->{file_filters}}, @contents;
+	}
+	if ( @contents ) {
+		my $files = scalar @contents;
+
+		# Extract the needed files
+		my $Tar = Archive::Tar->new( $local_tar )
+			or  die('Failed to create Archive::Tar object');
+		foreach my $wanted ( @contents ) {
+			my $source_file = File::Spec->catfile(
+				$self->processor->source, $file, $wanted,
+				);
+			$self->trace("    $wanted");
+			$Tar->extract_file( $wanted, $source_file )
+				or die('Failed to extract $wanted');
+			$self->trace(" ... extracted\n");
+		}
+
+		$Tar->clear;
+	} else {
+		# Create an empty directory so it isn't checked over and over
+		my $source_dir = File::Spec->catfile( $self->processor->source, $file );
+		File::Path::mkpath( $source_dir, $self->{trace}, $self->{dirmode} );
+	}
+
+	1;
 }
 
 
@@ -194,35 +275,9 @@ sub mirror_file {
 	my ($self, $file) = @_;
 	my $rv = $self->SUPER::mirror_file($file);
 
-	# Extract the new file to the matching directory in
-	# the processor source directory.
-	my $local_tar = File::Spec->catfile( $self->{local}, $file );
-	my @contents  = Archive::Tar->list_archive( $local_tar );
-
-	# Filter to get just the ones we want
-	@contents = grep { /\.(?:pm|pl|t)$/ } @contents;
-	if ( $self->{file_filters} ) {
-		@contents = grep &{$self->{file_filters}}, @contents;
-	}
-	if ( @contents ) {
-		my $files = scalar @contents;
-		$self->trace(" ... $files file(s) to process\n");
-
-		# Extract the needed files
-		my $Tar = Archive::Tar->read( $local_tar )
-			or die('Failed to create Archive::Tar object');
-		foreach my $wanted ( @contents ) {
-			my $source_file = File::Spec->catfile(
-				$self->processor->source, $file, $wanted,
-				);
-			$self->trace("        extracting $wanted");
-			$Tar->extract_file( $wanted, $source_file )
-				or die('Failed to extract $wanted');
-			$self->trace(" ... extracted\n");
-		}
-
-		$Tar->clear;
-		$self->trace("        All files to process extracted");
+	# Expand the tarball if needed
+	unless ( -d File::Spec->catfile( $self->processor->source, $file ) ) {
+		$self->expand_file( $file ) or return undef;
 	}
 
 	$self->{added}->{$file} = 1;
@@ -237,11 +292,8 @@ sub clean_file {
 	# Remove the source directory, if it exists
 	my $source_path = File::Spec->catfile( $self->processor->source, $file );
 	if ( -e $source_path ) {
-		if ( File::Remove::remove( \1, $source_path ) ) {
-			$self->trace(' ... removed processing files');
-		} else {
-			warn "Cannot remove $source_path $!";
-		}
+		File::Remove::remove( \1, $source_path )
+			or warn "Cannot remove $source_path $!";
 	}
 
 	# We are doing this in the reverse order to when we created it.
