@@ -48,7 +48,7 @@ use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 our $errstr  = '';
 
 
@@ -216,9 +216,10 @@ sub run {
 	my $self = shift->_clear;
 
 	# Prepare to start
+	local $| = 1;
+	my $changes;
 	$self->{added}   = {};
 	$self->{cleaned} = {};
-	my $changes;
 
 	# Update the CPAN::Mini local mirror
 	if ( $self->{update_mirror} ) {
