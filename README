@@ -18,9 +18,14 @@ DESCRIPTION
     A PPI::Processor is then started and run against all of the perl files
     contained in the working directory.
 
-STATUS
-    Although this module is largely complete, it is broken pending upgrades
-    to CPAN::Mini to support instantiability.
+EXTENDING
+    This module is relatively stable and complete, but currently uses a
+    private modified version of CPAN::Mini. Several additional features of
+    this are yet to be merged back into CPAN::Mini, and so the code and API
+    are subject to change without notice.
+
+    If you wish to write an extension, please stay in contact with the
+    maintainer while doing so.
 
 METHODS
   new

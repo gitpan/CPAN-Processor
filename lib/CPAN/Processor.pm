@@ -22,10 +22,15 @@ it will extract all of the perl files to a processor working directory.
 A PPI::Processor is then started and run against all of the perl files
 contained in the working directory.
 
-=head1 STATUS
+=head1 EXTENDING
 
-Although this module is largely complete, it is broken pending upgrades to
-CPAN::Mini to support instantiability.
+This module is relatively stable and complete, but currently uses a
+private modified version of CPAN::Mini. Several additional features of
+this are yet to be merged back into CPAN::Mini, and so the code and API
+are subject to change without notice.
+
+If you wish to write an extension, please stay in contact with the
+maintainer while doing so.
 
 =head1 METHODS
 
@@ -35,6 +40,7 @@ use 5.006;
 use strict;
 use UNIVERSAL 'isa';
 use base 'CPAN::Processor::CPANMini';
+use List::Util     ();
 use File::Path     ();
 use File::Remove   ();
 use IO::File       ();
@@ -42,7 +48,7 @@ use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 our $errstr  = '';
 
 
@@ -154,8 +160,9 @@ sub new {
 	# Compile file_filters if needed
 	$self->_compile_filter('file_filters') or return undef;
 
-	# Compile the Archive::Tar reporter
-	$self->_compile_warn_hook or return undef;
+	# Compile the various reports if needed
+	$self->_init_archive_tar_report      or return undef;
+	$self->_init_missing_makefile_report or return undef;
 
 	# Add the additional properties
 	$self->{processor}       = $Processor;
@@ -238,8 +245,12 @@ sub run {
 
 	# Release the warning report file if needed
 	if ( $self->{archive_tar_handle} ) {
-		$self->{archive_tar_handle}->close();
+		$self->{archive_tar_handle}->close;
 		delete $self->{archive_tar_handle};
+	}
+	if ( $self->{missing_makefile_handle} ) {
+		$self->{missing_makefile_handle}->close;
+		delete $self->{missing_makefile_handle};
 	}
 
 	# Return now if no changes
@@ -248,6 +259,7 @@ sub run {
 	}
 
 	# Launch the processor
+	$self->trace("Starting PPI::Processor...\n");
 	$self->processor->run;
 }
 
@@ -284,14 +296,19 @@ sub update_mirror {
 # Track what we have added
 sub mirror_file {
 	my ($self, $file) = (shift, shift);
+
+	# Do the normal stuff
 	my $rv = $self->SUPER::mirror_file($file, @_);
 
 	# Expand the tarball if needed
 	unless ( -d File::Spec->catfile( $self->processor->source, $file ) ) {
+		$self->{current_file} = $file;
 		$self->mirror_expand( $file ) or return undef;
+		delete $self->{current_file};
 	}
 
 	$self->{added}->{$file} = 1;
+	delete $self->{current_file};
 	$rv;
 }
 
@@ -300,9 +317,6 @@ sub mirror_expand {
 
 	# Don't try to expand anything other than tarballs
 	return 1 unless $file =~ /\.tar\.gz$/;
-
-	# Set the current_file element if the warn_hook needs it
-	$self->{current_file} = $file;
 
 	# Extract the new file to the matching directory in
 	# the processor source directory.
@@ -315,6 +329,9 @@ sub mirror_expand {
 			};
 	}
 	return $self->_tar_error if ( $@ or ! @contents );
+
+	# Run the optional "Missing Makefile.PL" report (ignoring return value)
+	$self->_missing_makefile_report( $file, \@contents );
 
 	# Filter to get just the ones we want
 	@contents = grep { /\.(?:pm|pl|t)$/ } @contents;
@@ -372,19 +389,6 @@ sub mirror_expand {
 	}
 
 	1;
-}
-
-sub _tar_error {
-	my $self    = shift;
-
-	# Get and clean up the message
-	my $message = shift || "Expansion of $self->{current_file} failed";
-	$message .= " (Archive::Tar warning)" if $@ =~ /Archive::Tar warning/;
-	$message .= "\n";
-
-	$self->trace( $message );
-	delete $self->{current_file};
-	return 1;	
 }
 
 # Also remove any processing directory.
@@ -469,7 +473,7 @@ sub _compile_filter {
 }
 
 # Compile the optional Archive::Tar report function, if needed
-sub _compile_warn_hook {
+sub _init_archive_tar_report {
 	my $self = shift;
 
 	# Shortcut if nothing set
@@ -481,7 +485,7 @@ sub _compile_warn_hook {
 	# We have a file, get a handle to it
 	my $fh = IO::File->new;
 	unless ( defined $fh->open( $self->{archive_tar_report}, '>' ) ) {
-		return $self->_error( "Failed to write archive_tar_report '$self->{archive_tar_report}'" )
+		return $self->_error( "Failed to open archive_tar_report '$self->{archive_tar_report}'" )
 	}
 	$self->{archive_tar_handle} = $fh;
 
@@ -490,12 +494,66 @@ sub _compile_warn_hook {
 		if ( $self->{archive_tar_handle} ) {
 			my $message = shift;
 			$message =~ s~\s+at CPAN/modules/CPAN/Processor\.pm.*~~;
-			$self->{archive_tar_handle}->print( "\n" );
-			$self->{archive_tar_handle}->print( "$self->{archive_tar_report}\n" );
+			$self->{archive_tar_handle}->print( "$self->{current_file}\n" );
 			$self->{archive_tar_handle}->print( "$message\n" );
 		}
 		die "Archive::Tar warning";
 		};
+
+	# Write the header for the report
+	$self->trace("Generating Archive::Tar Report (archive_tar_report provided)\n");
+	my $t = scalar localtime time;
+	$fh->print("Archive::Tar Warnings and Errors Report\n");
+	$fh->print("(Generated by CPAN::Processor $VERSION at $t)\n");
+	$fh->print("\n");
+	$fh->print("This report outlines all .tar.gz files found in CPAN that\n");
+	$fh->print("generated either a die or warn during ->list_archive( tarfile ) ,\n");
+	$fh->print("->new( tarfile ), or \$Tar->extract_file( file, destination )\n");
+	$fh->print("----------------------------------------------------------------\n");
+	$fh->print("\n");
+
+	1;
+}
+
+# Load a handle for a report
+sub _init_missing_makefile_report {
+	my $self = shift;
+	return 1 unless $self->{missing_makefile_report};
+
+	# We have a file, get a handle to it
+	my $fh = IO::File->new;
+	unless ( defined $fh->open( $self->{missing_makefile_report}, '>' ) ) {
+		return $self->_error( "Failed to open missing_makefile_report '$self->{missing_makefile_report}'" )
+	}
+	$self->{missing_makefile_handle} = $fh;
+
+	# Write the header for the report
+	$self->trace("Generating Missing Makefile.PL Report (missing_makefile_report provided)\n");
+	my $t = scalar localtime time;
+	$fh->print("Report: Has Build.PL without a Makefile.PL\n");
+	$fh->print("(Generated by CPAN::Processor $VERSION at $t)\n");
+	$fh->print("\n");
+	$fh->print("This report outlines all .tar.gz files found in CPAN that\n");
+	$fh->print("had a new-style Build.PL but did not have an Makefile.PL,\n");
+	$fh->print("which is needed for compatibility with older CPAN.pm versions\n");
+	$fh->print("----------------------------------------------------------------\n");
+	$fh->print("\n");
+
+	1;
+}
+
+sub _missing_makefile_report {
+	my ($self, $file, $contents) = @_;
+	return 1 unless $self->{missing_makefile_handle};
+
+	# Skip if the tarball does not have a Build.PL
+	return 1 unless List::Util::first { /\bBuild.PL$/i } @$contents;
+
+	# Does it have a Makefile.PL?
+	return 1 if List::Util::first { /\bMakefile.PL$/i } @$contents;
+
+	# Has Build.PL, but not Makefile.PL
+	$self->{missing_makefile_handle}->print( "$self->{current_file}\n" );
 
 	1;
 }
@@ -504,6 +562,18 @@ sub _compile_warn_hook {
 sub _error {
 	$errstr = $_[1];
 	undef;
+}
+
+sub _tar_error {
+	my $self    = shift;
+
+	# Get and clean up the message
+	my $message = shift || "Expansion of $self->{current_file} failed";
+	$message .= " (Archive::Tar warning)" if $@ =~ /Archive::Tar warning/;
+	$message .= "\n";
+
+	$self->trace( $message );
+	1;	
 }
 
 =pod
