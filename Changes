@@ -1,5 +1,8 @@
 Revision history for Perl extension CPAN::Processor
 
+0.05 Mon Jan 10 2005
+	- Added support for Archive::Tar warning reports
+
 0.04 Sun Jan  9 2005
 	- Added the force_processor option
 

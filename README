@@ -77,6 +77,14 @@ METHODS
         forces the processor to go back over every tarball in the mirror and
         double check that it has a corrosponding expanded directory.
 
+    archive_tar_report
+        CPAN::Processor does a lot of work with Archive::Tar, and tends to
+        encounter a lot of warnings from the various tarballs in CPAN.
+
+        If set to a writable filename, a detailed report on the various
+        warnings encountered during processing will be written to the file
+        you specify.
+
     Returns a new CPAN::Processor object, or "undef" on error.
 
   processor

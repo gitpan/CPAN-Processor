@@ -37,11 +37,12 @@ use UNIVERSAL 'isa';
 use base 'CPAN::Processor::CPANMini';
 use File::Path     ();
 use File::Remove   ();
+use IO::File       ();
 use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 our $errstr  = '';
 
 
@@ -113,6 +114,15 @@ Once the mirror update has been completed, the check_expand keyword
 forces the processor to go back over every tarball in the mirror and
 double check that it has a corrosponding expanded directory.
 
+=item archive_tar_report
+
+CPAN::Processor does a lot of work with L<Archive::Tar>, and tends to
+encounter a lot of warnings from the various tarballs in CPAN.
+
+If set to a writable filename, a detailed report on the various
+warnings encountered during processing will be written to the file you
+specify.
+
 =back
 
 Returns a new CPAN::Processor object, or C<undef> on error.
@@ -143,6 +153,9 @@ sub new {
 
 	# Compile file_filters if needed
 	$self->_compile_filter('file_filters') or return undef;
+
+	# Compile the Archive::Tar reporter
+	$self->_compile_warn_hook or return undef;
 
 	# Add the additional properties
 	$self->{processor}       = $Processor;
@@ -223,6 +236,12 @@ sub run {
 		}
 	}
 
+	# Release the warning report file if needed
+	if ( $self->{archive_tar_handle} ) {
+		$self->{archive_tar_handle}->close();
+		delete $self->{archive_tar_handle};
+	}
+
 	# Return now if no changes
 	unless ( $changes or $self->{force_processor} ) {
 		return 1;
@@ -282,25 +301,20 @@ sub mirror_expand {
 	# Don't try to expand anything other than tarballs
 	return 1 unless $file =~ /\.tar\.gz$/;
 
+	# Set the current_file element if the warn_hook needs it
+	$self->{current_file} = $file;
+
 	# Extract the new file to the matching directory in
 	# the processor source directory.
-	my $local_tar  = File::Spec->catfile( $self->{local}, $file );
+	my $local_tar = File::Spec->catfile( $self->{local}, $file );
 	my @contents;
 	{
-		local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+		local $SIG{__WARN__} = $self->{warn_hook};
 		@contents = eval {
 			Archive::Tar->list_archive( $local_tar );
 			};
 	}
-	if ( $@ or ! @contents ) {
-		# There was an error during the extraction
-		my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
-		my $message = $tar_warning
-				? "Expansion of $file failed (Archive::Tar warning)\n"
-				: "Expansion of $file failed\n";
-		$self->trace( $message );
-		return 1;
-	}
+	return $self->_tar_error if ( $@ or ! @contents );
 
 	# Filter to get just the ones we want
 	@contents = grep { /\.(?:pm|pl|t)$/ } @contents;
@@ -313,20 +327,14 @@ sub mirror_expand {
 		# Extract the needed files
 		my $Tar;
 		{
-			local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+			local $SIG{__WARN__} = $self->{warn_hook};
 			$Tar = eval {
 				Archive::Tar->new( $local_tar );
 				};
 		}
-		if ( $@ or ! $Tar ) {
-			# There was an error during the extraction
-			my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
-			my $message = $tar_warning
-					? "Expansion of $file failed (Archive::Tar warning)\n"
-					: "Expansion of $file failed\n";
-			$self->trace( $message );
-			return 1;
-		}
+		return $self->_tar_error() if ( $@ or ! $Tar );
+
+		# Iterate and extract each file
 		foreach my $wanted ( @contents ) {
 			my $source_file = File::Spec->catfile(
 				$self->processor->source, $file, $wanted,
@@ -335,28 +343,24 @@ sub mirror_expand {
 
 			my $rv;
 			{
-				local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+				local $SIG{__WARN__} = $self->{warn_hook};
 				$rv = eval {
 					$Tar->extract_file( $wanted, $source_file );
 					};
 			}
-
-			# There was an error during the extraction
-			my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
-			if ( $rv and ! $tar_warning ) {
-				$self->trace(" ... extracted\n");
-				chmod 0644, $source_file;
-			} else {
-				my $message = $tar_warning
-					? " ... failed (Archive::Tar warning)\n"
-					: " ... failed\n";
-				$self->trace( $message );
+			unless ( $@ or ! $rv ) {
+				# There was an error during the extraction
 				if ( -e $source_file ) {
 					# Remove any partial file left behind
 					chmod 0644, $source_file;
 					File::Remove::remove( $source_file );
 				}
+				return $self->_tar_error( " ... failed" );
 			}
+
+			# Extraction successful
+			$self->trace(" ... extracted\n");
+			chmod 0644, $source_file;
 		}
 
 		$Tar->clear;
@@ -367,6 +371,19 @@ sub mirror_expand {
 	}
 
 	1;
+}
+
+sub _tar_error {
+	my $self    = shift;
+
+	# Get and clean up the message
+	my $message = shift || "Expansion of $self->{current_file} failed";
+	$message .= " (Archive::Tar warning)" if $@ =~ /Archive::Tar warning/;
+	$message .= "\n";
+
+	$self->trace( $message );
+	delete $self->{current_file};
+	return 1;	
 }
 
 # Also remove any processing directory.
@@ -445,6 +462,38 @@ sub _compile_filter {
 				return '' if $_ =~ $regexp;
 			}
 			1;
+		};
+
+	1;
+}
+
+# Compile the optional Archive::Tar report function, if needed
+sub _compile_warn_hook {
+	my $self = shift;
+
+	# Shortcut if nothing set
+	unless ( $self->{archive_tar_report} ) {
+		$self->{warn_hook} = sub { die "Archive::Tar warning" };
+		return 1;
+	}
+
+	# We have a file, get a handle to it
+	my $fh = IO::File->new;
+	unless ( defined $fh->open( $self->{archive_tar_report}, '>' ) ) {
+		return $self->_error( "Failed to write archive_tar_report '$self->{archive_tar_report}'" )
+	}
+	$self->{archive_tar_handle} = $fh;
+
+	# Set the larger reporter function
+	$self->{warn_hook} = sub {
+		if ( $self->{archive_tar_handle} ) {
+			my $message = shift;
+			$message =~ s~\s+at CPAN/modules/CPAN/Processor\.pm.*~~;
+			$self->{archive_tar_handle}->print( "\n" );
+			$self->{archive_tar_handle}->print( "$self->{archive_tar_report}\n" );
+			$self->{archive_tar_handle}->print( "$message\n" );
+		}
+		die "Archive::Tar warning";
 		};
 
 	1;
