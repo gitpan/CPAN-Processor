@@ -129,9 +129,10 @@ sub _filter_module {
 	if($self->{skip_perl}) {
 		return 1 if $args->{path} =~ m{/(?:emb|syb|bio)*perl-\d}i;
 		return 1 if $args->{path} =~ m{/(?:parrot|ponie)-\d}i;
+		return 1 if $args->{path} =~ m{/\bperl5\.0}i;
 	}
 
- if ($self->{path_filters}) {
+	if ($self->{path_filters}) {
 		if (ref $self->{path_filters} && ref $self->{path_filters} eq 'ARRAY') {
 			foreach my $filter (@{ $self->{path_filters} }) {
 				return 1 if $args->{path} =~ $filter;

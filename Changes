@@ -1,4 +1,8 @@
 Revision history for Perl extension CPAN::Processor
 
+0.02 Thu Dec 30 2004
+	- Upgraded version dependency to 5.006
+	- Cleaned up and added code to handle tarballs errors better
+
 0.01 Tue Dec 28 2004
 	- Created the initial version of the module

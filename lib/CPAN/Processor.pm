@@ -30,17 +30,18 @@ CPAN::Mini to support instantiability.
 =head1 METHODS
 
 =cut
+
 use 5.006;
 use strict;
 use UNIVERSAL 'isa';
 use base 'CPAN::Processor::CPANMini';
+use File::Path     ();
 use File::Remove   ();
 use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
-use File::Path     ();
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 our $errstr  = '';
 
 
@@ -137,7 +138,8 @@ sub new {
 	$self->_compile_filter('file_filters') or return undef;
 
 	# Add the additional properties
-	$self->{processor} = $Processor;
+	$self->{processor}    = $Processor;
+	$self->{check_expand} = 1 if $self->{force_expand};
 
 	$self;
 }
@@ -171,10 +173,9 @@ files in the source directory.
 =cut
 
 sub run {
-	my $self = shift;
+	my $self = shift->_clear;
 
 	# Prepare to start
-	$self->_clear;
 	$self->{added}   = {};
 	$self->{cleaned} = {};
 
@@ -188,18 +189,18 @@ sub run {
 		return $self->_error($message);
 	}
 
-	if ( $self->{check_expand} ) {
-		# Expansion checking is enabled, find the full list of
-		# files to check.
+	if ( $self->{check_expand} and ! $self->{force} ) {
+		# Expansion checking is enabled, and we didn't do a normal
+		# forced check, so find the full list of files to check.
 		$self->trace("Tarball expansion checking enabled\n");
 		my @files = File::Find::Rule->new
 		                            ->file
 		                            ->name('*.tar.gz')
 		                            ->relative
 		                            ->in( $self->{local} );
-		$self->trace("Checking " . scalar(@files) . " tarballs\n");
 
 		# Filter to just those we need to expand
+		$self->trace("Checking " . scalar(@files) . " tarballs\n");
 		@files = grep { ! -d File::Spec->catfile( $self->processor->source, $_ ) } @files;
 		if ( @files ) {
 			$self->trace("Scheduling " . scalar(@files) . " tarballs for expansion\n");
@@ -209,7 +210,7 @@ sub run {
 
 		# Expand each of the tarballs
 		foreach my $file ( sort @files ) {
-			$self->expand_file( $file );
+			$self->mirror_expand( $file );
 			$changes++;
 		}
 	}
@@ -221,7 +222,51 @@ sub run {
 	$self->processor->run;
 }
 
-sub expand_file {
+
+
+
+
+
+#####################################################################
+# CPAN::Mini Methods
+
+# If doing forced expansion, remove the old expanded files
+# before beginning the mirror update so we don't have to redelete
+# and create the ones we do during the update.
+sub update_mirror {
+	my $self = shift;
+
+	# If we want to force re-expansion,
+	# remove all current expansion dirs.
+	if ( $self->{force_expand} ) {
+		$self->trace("Flushing all expansion directories (flush_expand enabled)\n");
+		my $authors_dir = File::Spec->catfile( $self->processor->source, 'authors' );
+		if ( -e $authors_dir ) {
+			$self->trace("Removing $authors_dir");
+			File::Remove::remove( \1, $authors_dir )
+				or die "Failed to remove previous expansion directory '$authors_dir'";
+			$self->trace(" ... removed\n");
+		}
+	}
+
+	$self->SUPER::update_mirror(@_);
+}
+
+# Track what we have added
+sub mirror_file {
+	my ($self, $file) = (shift, shift);
+	my $rv = $self->SUPER::mirror_file($file, @_);
+
+	# Expand the tarball if needed
+	unless ( -d File::Spec->catfile( $self->processor->source, $file ) ) {
+		$self->mirror_expand( $file ) or return undef;
+	}
+
+	$self->{added}->{$file} = 1;
+	$rv;
+}
+
+sub mirror_expand {
 	my ($self, $file) = @_;
 
 	# Don't try to expand anything other than tarballs
@@ -230,7 +275,22 @@ sub expand_file {
 	# Extract the new file to the matching directory in
 	# the processor source directory.
 	my $local_tar  = File::Spec->catfile( $self->{local}, $file );
-	my @contents  = Archive::Tar->list_archive( $local_tar );
+	my @contents;
+	{
+		local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+		@contents = eval {
+			Archive::Tar->list_archive( $local_tar );
+			};
+	}
+	if ( $@ or ! @contents ) {
+		# There was an error during the extraction
+		my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
+		my $message = $tar_warning
+				? "Expansion of $file failed (Archive::Tar warning)\n"
+				: "Expansion of $file failed\n";
+		$self->trace( $message );
+		return 1;
+	}
 
 	# Filter to get just the ones we want
 	@contents = grep { /\.(?:pm|pl|t)$/ } @contents;
@@ -241,16 +301,52 @@ sub expand_file {
 		my $files = scalar @contents;
 
 		# Extract the needed files
-		my $Tar = Archive::Tar->new( $local_tar )
-			or  die('Failed to create Archive::Tar object');
+		my $Tar;
+		{
+			local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+			$Tar = eval {
+				Archive::Tar->new( $local_tar );
+				};
+		}
+		if ( $@ or ! $Tar ) {
+			# There was an error during the extraction
+			my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
+			my $message = $tar_warning
+					? "Expansion of $file failed (Archive::Tar warning)\n"
+					: "Expansion of $file failed\n";
+			$self->trace( $message );
+			return 1;
+		}
 		foreach my $wanted ( @contents ) {
 			my $source_file = File::Spec->catfile(
 				$self->processor->source, $file, $wanted,
 				);
 			$self->trace("    $wanted");
-			$Tar->extract_file( $wanted, $source_file )
-				or die('Failed to extract $wanted');
-			$self->trace(" ... extracted\n");
+
+			my $rv;
+			{
+				local $SIG{__WARN__} = sub { die "Archive::Tar warning" };
+				$rv = eval {
+					$Tar->extract_file( $wanted, $source_file );
+					};
+			}
+
+			# There was an error during the extraction
+			my $tar_warning = 1 if $@ =~ /Archive::Tar warning/;
+			if ( $rv and ! $tar_warning ) {
+				$self->trace(" ... extracted\n");
+				chmod 0644, $source_file;
+			} else {
+				my $message = $tar_warning
+					? " ... failed (Archive::Tar warning)\n"
+					: " ... failed\n";
+				$self->trace( $message );
+				if ( -e $source_file ) {
+					# Remove any partial file left behind
+					chmod 0644, $source_file;
+					File::Remove::remove( $source_file );
+				}
+			}
 		}
 
 		$Tar->clear;
@@ -263,30 +359,23 @@ sub expand_file {
 	1;
 }
 
-
-
-
-
-#####################################################################
-# CPAN::Mini Methods
-
-# Track what we have added
-sub mirror_file {
-	my ($self, $file) = @_;
-	my $rv = $self->SUPER::mirror_file($file);
-
-	# Expand the tarball if needed
-	unless ( -d File::Spec->catfile( $self->processor->source, $file ) ) {
-		$self->expand_file( $file ) or return undef;
-	}
-
-	$self->{added}->{$file} = 1;
-	$rv;
-}
-
 # Also remove any processing directory.
 # And track what we have removed.
 sub clean_file {
+	my ($self, $file) = (shift, shift);
+
+	# Clean the expansion directory
+	$self->clean_expand( $file );
+
+	# We are doing this in the reverse order to when we created it.
+	my $rv = $self->SUPER::clean_file($file, @_);
+
+	$self->{cleaned}->{$file} = 1;
+	$rv;
+}
+
+# Remove a processing directory
+sub clean_expand {
 	my ($self, $file) = @_;
 
 	# Remove the source directory, if it exists
@@ -296,11 +385,7 @@ sub clean_file {
 			or warn "Cannot remove $source_path $!";
 	}
 
-	# We are doing this in the reverse order to when we created it.
-	my $rv = $self->SUPER::clean_file($file);
-
-	$self->{cleaned}->{$file} = 1;
-	$rv;
+	1;	
 }
 
 # Don't let ourself be forced into printing something
@@ -316,13 +401,20 @@ sub trace {
 #####################################################################
 # Support Methods and Error Handling
 
-# Compile a set of file filters
+# Compile a set of filters
 sub _compile_filter {
 	my $self = shift;
 	my $name = shift;
 
-	# Handle some common shortcut cases
+	# Shortcut for "no filters"
 	return 1 unless $self->{$name};
+
+	# Allow a single Regexp object for the filter
+	if ( isa(ref $self->{$name}, 'Regexp') ) {
+		$self->{$name} = [ $self->{$name} ];
+	}
+
+	# Check for bad cases
 	unless ( ref $self->{$name} eq 'ARRAY' ) {
 		return $self->_error("$name is not an ARRAY reference");
 	}
@@ -331,13 +423,18 @@ sub _compile_filter {
 		return 1;
 	}
 
-	# Build the anonymous sub
+	# Check we only got Regexp objects
 	my @filters = @{$self->{$name}};
+	if ( scalar grep { ! isa(ref $_, 'Regexp') } @filters ) {
+		return $self->_error("$name can only contains Regexp filters");
+	}
+
+	# Build the anonymous sub
 	$self->{$name} = sub {
-		foreach my $regex ( @filters ) {
-			return '' if $_ =~ $regex;
-		}
-		return 1;
+			foreach my $regexp ( @filters ) {
+				return '' if $_ =~ $regexp;
+			}
+			1;
 		};
 
 	1;
@@ -366,9 +463,11 @@ sub errstr {
 	$errstr;
 }
 
-# Clear the error message
+# Clear the error message.
+# Returns the object/class as a convenience
 sub _clear {
 	$errstr = '';
+	$_[0];
 }
 
 1;
