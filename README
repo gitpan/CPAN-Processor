@@ -53,6 +53,12 @@ METHODS
         PPI::Proccessor object. The CPAN::Processor will call it's ->run
         method at the appropriate time.
 
+    force_processor
+        Under normal curcumstances, if there are no changes to the minicpan
+        mirror, the processor will need to be run. Enabling the
+        "force_processor" flag (false by default) will cause the processor
+        to be executed, even if there are no changes to the minicpan mirror.
+
     file_filters
         CPAN::Processor adds an additional type of filter to the standard
         ones.

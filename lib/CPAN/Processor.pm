@@ -41,7 +41,7 @@ use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 our $errstr  = '';
 
 
@@ -86,6 +86,13 @@ files once they have been updated and unpacked.
 The processor param should consist of a created and fully configured
 L<PPI::Proccessor> object. The CPAN::Processor will call it's ->run
 method at the appropriate time.
+
+=item force_processor
+
+Under normal curcumstances, if there are no changes to the minicpan
+mirror, the processor will need to be run. Enabling the C<force_processor>
+flag (false by default) will cause the processor to be executed, even if
+there are no changes to the minicpan mirror.
 
 =item file_filters
 
@@ -138,8 +145,9 @@ sub new {
 	$self->_compile_filter('file_filters') or return undef;
 
 	# Add the additional properties
-	$self->{processor}    = $Processor;
-	$self->{check_expand} = 1 if $self->{force_expand};
+	$self->{processor}       = $Processor;
+	$self->{check_expand}    = 1 if $self->{force_expand};
+	$self->{force_processor} ||= 0;
 
 	$self;
 }
@@ -216,7 +224,9 @@ sub run {
 	}
 
 	# Return now if no changes
-	return 1 unless $changes;
+	unless ( $changes or $self->{force_processor} ) {
+		return 1;
+	}
 
 	# Launch the processor
 	$self->processor->run;
