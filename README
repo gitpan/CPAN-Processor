@@ -50,6 +50,14 @@ METHODS
         Please note that CPAN::Processor applies some additional defaults,
         turning skip_perl on.
 
+    update_mirror
+        Before any processing run, the CPAN::Processor will execute the
+        "update_mirror" method (inherited from CPAN::Mini) to syncronise
+        with CPAN.
+
+        Although true by default, setting update_mirror to false will cause
+        the CPAN synchronisation to be skipped.
+
     processor
         A PPI Processor engine is used to do the actual processing of the
         perl files once they have been updated and unpacked.
@@ -121,9 +129,9 @@ AUTHOR
     Funding provided by The Perl Foundation
 
 COPYRIGHT
-    Copyright (c) 2004 Adam Kennedy. All rights reserved. This program is
-    free software; you can redistribute it and/or modify it under the same
-    terms as Perl itself.
+    Copyright (c) 2004 - 2005 Adam Kennedy. All rights reserved. This
+    program is free software; you can redistribute it and/or modify it under
+    the same terms as Perl itself.
 
     The full text of the license can be found in the LICENSE file included
     with this module.

@@ -1,5 +1,9 @@
 Revision history for Perl extension CPAN::Processor
 
+0.08 Tue Jan 11 2005
+	- Adding the update_mirror option to disable CPAN synchronisation
+	- Updated copyright date
+
 0.07 Mon Jan 10 2005
 	- Fixing some small bugs in the Archive::Tar report
 	- Added a report for "Build.PL but no Makefile.PL in tarball"

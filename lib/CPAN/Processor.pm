@@ -48,7 +48,7 @@ use IO::Zlib       (); # Will be needed by Archive::Tar
 use Archive::Tar   ();
 use PPI::Processor ();
 
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 our $errstr  = '';
 
 
@@ -84,6 +84,15 @@ can be used with CPAN::Mini will also work with CPAN::Processor.
 
 Please note that CPAN::Processor applies some additional defaults,
 turning skip_perl on.
+
+=item update_mirror
+
+Before any processing run, the CPAN::Processor will execute the
+C<update_mirror> method (inherited from CPAN::Mini) to syncronise
+with CPAN.
+
+Although true by default, setting update_mirror to false will cause
+the CPAN synchronisation to be skipped.
 
 =item processor
 
@@ -157,17 +166,20 @@ sub new {
 		return $class->_error($message);
 	}
 
+	# Set defaults and apply rules
+	$self->{update_mirror}   = 1 unless defined $self->{update_mirror};
+	$self->{check_expand}    = 1 if $self->{force_expand};
+	$self->{force_processor} = 0 unless defined $self->{force_processor};
+
+	# Add the processor to the object
+	$self->{processor} = $Processor;
+
 	# Compile file_filters if needed
 	$self->_compile_filter('file_filters') or return undef;
 
-	# Compile the various reports if needed
+	# Compile the optional reports
 	$self->_init_archive_tar_report      or return undef;
 	$self->_init_missing_makefile_report or return undef;
-
-	# Add the additional properties
-	$self->{processor}       = $Processor;
-	$self->{check_expand}    = 1 if $self->{force_expand};
-	$self->{force_processor} ||= 0;
 
 	$self;
 }
@@ -206,17 +218,20 @@ sub run {
 	# Prepare to start
 	$self->{added}   = {};
 	$self->{cleaned} = {};
+	my $changes;
 
 	# Update the CPAN::Mini local mirror
-	$self->trace("Updating MiniCPAN local mirror\n");
-	my $changes = eval { $self->update_mirror; };
-	$changes ||= 0;
-	if ( $@ ) {
-		my $message = $@;
-		$message =~ s/\bat line\b.+//;
-		return $self->_error($message);
+	if ( $self->{update_mirror} ) {
+		$self->trace("Updating MiniCPAN local mirror (update_mirror enabled)\n");
+		my $changes = eval { $self->update_mirror; };
+		if ( $@ ) {
+			my $message = $@;
+			$message =~ s/\bat line\b.+//;
+			return $self->_error($message);
+		}
 	}
 
+	$changes ||= 0;
 	if ( $self->{check_expand} and ! $self->{force} ) {
 		# Expansion checking is enabled, and we didn't do a normal
 		# forced check, so find the full list of files to check.
@@ -620,7 +635,7 @@ Funding provided by The Perl Foundation
 
 =head1 COPYRIGHT
 
-Copyright (c) 2004 Adam Kennedy. All rights reserved.
+Copyright (c) 2004 - 2005 Adam Kennedy. All rights reserved.
 This program is free software; you can redistribute
 it and/or modify it under the same terms as Perl itself.
 

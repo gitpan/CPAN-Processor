@@ -1,5 +1,5 @@
 name: CPAN-Processor
-version: 0.07
+version: 0.08
 abstract: Use PPI to process every perl file/module in CPAN
 author: Adam Kennedy<cpan@ali.as>
 license: perl
@@ -14,7 +14,7 @@ requires:
   File::Find::Rule: 0.27
   IO::Zlib: 1.04
   Archive::Tar: 1.22
-  PPI::Processor: 0.11
+  PPI::Processor: 0.12
   CPAN::Mini: 0.30
 no_index:
   directory:
